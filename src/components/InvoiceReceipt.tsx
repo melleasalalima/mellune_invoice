@@ -36,7 +36,7 @@ Customer: {CUST_NAME}
 💰TOTAL: *₱{TOTAL}*
 
 DP/Paid: ₱{AMOUNT_PAID}
-Total: ₱{TOTAL}
+Total: ₱{TOTAL} 
 Previous Balance: ₱{PREVIOUS_BALANCE}
 *BALANCE: ₱{BALANCE}*
 
