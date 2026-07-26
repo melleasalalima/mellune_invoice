@@ -1,0 +1,6 @@
+{
+  "name": "Beads Shop Invoicing & Inventory",
+  "description": "Role-based invoicing and inventory management system for a beads shop, featuring downloadable PNG/PDF invoices, copyable chat scripts, and SKU picture visualization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

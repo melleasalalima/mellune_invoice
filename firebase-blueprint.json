@@ -1,0 +1,256 @@
+{
+  "entities": {
+    "user": {
+      "title": "User Profile",
+      "description": "User account information and system role.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The unique user ID from Firebase Authentication."
+        },
+        "email": {
+          "type": "string",
+          "description": "The email address of the user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The display name of the user."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "admin", "user"],
+          "description": "The security role determining app access levels."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the profile was generated."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the profile was last updated."
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt", "updatedAt"]
+    },
+    "inventoryItem": {
+      "title": "Inventory Item SKU",
+      "description": "Item of stock in the beads shop, including quantity and picture.",
+      "type": "object",
+      "properties": {
+        "sku": {
+          "type": "string",
+          "description": "The unique Stock Keeping Unit identifier (e.g., SKU-BEAD-RED-01)."
+        },
+        "name": {
+          "type": "string",
+          "description": "The descriptive name of the bead item."
+        },
+        "description": {
+          "type": "string",
+          "description": "Details about size, materials, or style of the bead."
+        },
+        "category": {
+          "type": "string",
+          "description": "Bead category (e.g., Glass, Seed, Acrylic, Wooden, Pearl, Crystal)."
+        },
+        "price": {
+          "type": "number",
+          "description": "Unit price of the item."
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Total stock currently in inventory."
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Base64 encoded photo or illustration URL for the inventory SKU."
+        },
+        "color": {
+          "type": "string",
+          "description": "Visual color description."
+        },
+        "size": {
+          "type": "string",
+          "description": "Size measurement (e.g. 2mm, 4mm, 8mm, Mixed)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastUpdatedBy": {
+          "type": "string",
+          "description": "User email or ID who last edited this item."
+        }
+      },
+      "required": ["sku", "name", "price", "quantity", "createdAt", "updatedAt"]
+    },
+    "invoice": {
+      "title": "Shop Invoice",
+      "description": "Invoice generated for bead sales.",
+      "type": "object",
+      "properties": {
+        "invoiceNumber": {
+          "type": "string",
+          "description": "Auto-incremented or unique sequential invoice number (e.g., INV-1001)."
+        },
+        "customerName": {
+          "type": "string",
+          "description": "The name of the purchaser."
+        },
+        "customerPhone": {
+          "type": "string",
+          "description": "The contact number of the purchaser."
+        },
+        "customerEmail": {
+          "type": "string",
+          "description": "The email of the purchaser."
+        },
+        "items": {
+          "type": "array",
+          "description": "Array of sold SKU objects with price, name, quantity, and imageUrl."
+        },
+        "totalAmount": {
+          "type": "number",
+          "description": "Total bill of items included in the invoice."
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "paid", "cancelled"],
+          "description": "Current collection state of the invoice."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Method chosen by client (e.g. GCash, Bank Transfer, Cash)."
+        },
+        "createdById": {
+          "type": "string",
+          "description": "User UID who generated this invoice."
+        },
+        "createdByEmail": {
+          "type": "string",
+          "description": "User email who generated this invoice."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "shippingStatus": {
+          "type": "string",
+          "enum": ["pending", "shipped", "delivered"],
+          "description": "The shipment delivery phase of the order."
+        },
+        "invoiceStatus": {
+          "type": "string",
+          "enum": ["draft", "confirmed", "completed", "cancelled"],
+          "description": "The processing status of the invoice record."
+        },
+        "description": {
+          "type": "string",
+          "description": "Custom comments or description for the invoice."
+        }
+      },
+      "required": ["invoiceNumber", "customerName", "items", "totalAmount", "paymentStatus", "createdById", "createdAt", "updatedAt"]
+    },
+    "shopSettings": {
+      "title": "Invoice Shop Settings",
+      "description": "Shop details and templates for copyable scripts or payment data.",
+      "type": "object",
+      "properties": {
+        "shopName": {
+          "type": "string"
+        },
+        "gcashNumber": {
+          "type": "string"
+        },
+        "gcashName": {
+          "type": "string"
+        },
+        "bankDetails": {
+          "type": "string"
+        },
+        "chatTemplate": {
+          "type": "string",
+          "description": "Customizable text script template for sharing with customers."
+        },
+        "updatedBy": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["shopName", "updatedAt"]
+    },
+    "customer": {
+      "title": "Shop Customer",
+      "description": "Customer contact information and details.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the customer."
+        },
+        "email": {
+          "type": "string",
+          "description": "The customer's email address."
+        },
+        "phone": {
+          "type": "string",
+          "description": "The customer's contact number."
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["Standard", "VIP", "Platinum", "Wholesaler"],
+          "description": "Dynamic loyalty status classification."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional background info or preferences notes."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["name", "email", "phone", "tier", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "Individual profiles and core database roles."
+    },
+    "/inventory/{itemId}": {
+      "schema": "inventoryItem",
+      "description": "Item listings in the beads shop."
+    },
+    "/invoices/{invoiceId}": {
+      "schema": "invoice",
+      "description": "Invoice sale records."
+    },
+    "/settings/{settingsId}": {
+      "schema": "shopSettings",
+      "description": "Global settings for the beads shop."
+    },
+    "/customers/{customerId}": {
+      "schema": "customer",
+      "description": "Bead shop customer records for loyalty and ledger tracking."
+    }
+  }
+}

@@ -1,0 +1,222 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Role lookups
+    function getUserDocument(userId) {
+      return get(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             getUserDocument(request.auth.uid).data.role == role;
+    }
+
+    function isSuperAdmin() {
+      return hasRole('super_admin') || (isSignedIn() && request.auth.token.email == 'melleasalalima@gmail.com');
+    }
+
+    function isAdmin() {
+      return isSuperAdmin() || hasRole('admin');
+    }
+
+    // --- ENTITY VALIDATIONS ---
+
+    function isValidUser(data) {
+      return data.uid is string && 
+             data.uid.size() <= 128 &&
+             data.email is string &&
+             data.email.size() <= 150 &&
+             data.displayName is string &&
+             data.displayName.size() <= 100 &&
+             data.role in ['super_admin', 'admin', 'user'] &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidInventoryItem(data) {
+      return data.sku is string &&
+             data.sku.size() <= 128 &&
+             data.name is string &&
+             data.name.size() <= 200 &&
+             (!data.keys().contains('supplier') || (data.supplier is string && data.supplier.size() <= 150)) &&
+             data.price is number &&
+             data.price >= 0 &&
+             data.quantity is number &&
+             data.quantity >= 0 &&
+             (!data.keys().contains('measurementUnit') || data.measurementUnit in ['pc', 'ml', 'g']) &&
+             (!data.keys().contains('sellingUnitQuantity') || (data.sellingUnitQuantity is number && data.sellingUnitQuantity > 0)) &&
+             (!data.keys().contains('sellingMeasures') || (data.sellingMeasures is list && data.sellingMeasures.size() <= 20)) &&
+             (!data.keys().contains('purchaseCost') || (data.purchaseCost is number && data.purchaseCost >= 0)) &&
+             (!data.keys().contains('purchaseQuantity') || (data.purchaseQuantity is number && data.purchaseQuantity > 0)) &&
+             (!data.keys().contains('baseUnitCost') || (data.baseUnitCost is number && data.baseUnitCost >= 0)) &&
+             (!data.keys().contains('markupPercent') || (data.markupPercent is number && data.markupPercent >= 0)) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidStockHistory(data) {
+      return data.sku is string &&
+             data.sku.size() <= 128 &&
+             data.itemName is string &&
+             data.itemName.size() <= 200 &&
+             data.imageUrl is string &&
+             data.action in ['created', 'stock_added', 'stock_removed', 'updated'] &&
+             data.previousQuantity is number &&
+             data.previousQuantity >= 0 &&
+             data.newQuantity is number &&
+             data.newQuantity >= 0 &&
+             data.quantityChange is number &&
+             data.measurementUnit in ['pc', 'ml', 'g'] &&
+             data.createdBy is string &&
+             data.createdBy.size() <= 150 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidInvoice(data) {
+      return data.invoiceNumber is string &&
+             data.invoiceNumber.size() <= 50 &&
+             data.customerName is string &&
+             data.customerName.size() <= 100 &&
+             (!data.keys().contains('customerFacebookName') || (data.customerFacebookName is string && data.customerFacebookName.size() <= 150)) &&
+             data.totalAmount is number &&
+             data.totalAmount >= 0 &&
+             data.paymentStatus in ['Unpaid', 'Partially Paid', 'Paid', 'Cancelled'] &&
+             (!data.keys().contains('amountPaid') || (data.amountPaid is number && data.amountPaid >= 0)) &&
+             (!data.keys().contains('previousBalance') || (data.previousBalance is number && data.previousBalance >= 0)) &&
+             data.items is list &&
+             data.items.size() <= 100 &&
+             data.createdById is string &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp &&
+             (!data.keys().contains('shippingStatus') || data.shippingStatus in ['pending', 'shipped', 'delivered']) &&
+             (!data.keys().contains('invoiceStatus') || data.invoiceStatus in ['draft', 'confirmed', 'completed', 'cancelled']) &&
+             (!data.keys().contains('description') || (data.description is string && data.description.size() <= 2000));
+    }
+
+    function isValidShopSettings(data) {
+      return data.shopName is string &&
+             data.shopName.size() <= 100 &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return data.name is string &&
+             data.name.size() <= 100 &&
+             data.phone is string &&
+             data.phone.size() <= 50 &&
+             data.email is string &&
+             data.email.size() <= 150 &&
+             (!data.keys().contains('facebookName') || (data.facebookName is string && data.facebookName.size() <= 150)) &&
+             data.tier in ['Standard', 'VIP', 'Platinum', 'Wholesaler'] &&
+             (!data.keys().contains('notes') || (data.notes is string && data.notes.size() <= 1000)) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    // --- COLLECTION RULES ---
+
+    // 2. Users Collection Rules
+    match /users/{userId} {
+      // Allow user to fetch their own profile document securely (Non-recursive base)
+      allow get: if isSignedIn() && userId == request.auth.uid;
+      
+      // Allow admins to fetch any user's profile document
+      allow get: if isSignedIn() && isAdmin();
+
+      allow list: if isAdmin();
+      
+      // Let the bootstrapped super admin create their super admin profile; all others must register as standard secondary users
+      allow create: if isSignedIn() && isOwner(userId) && isValidUser(incoming()) && (
+        (incoming().role == 'super_admin' && request.auth.token.email == 'melleasalalima@gmail.com') ||
+        (incoming().role == 'user' && request.auth.token.email != 'melleasalalima@gmail.com')
+      );
+      
+      // Super admins can update any user's role. A user can update their own profile name but NOT their role.
+      allow update: if isSignedIn() && isValidUser(incoming()) && (
+        isSuperAdmin() ||
+        (isOwner(userId) && 
+         incoming().role == existing().role && 
+         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+      );
+      
+      allow delete: if isSuperAdmin();
+    }
+
+    // 3. Inventory Stock Collection Rules
+    match /inventory/{itemId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidInventoryItem(incoming());
+      
+      // Allow stock updates by Admin/Super Admin
+      allow update: if isAdmin() && isValidInventoryItem(incoming()) && 
+                    incoming().createdAt == existing().createdAt;
+                    
+      allow delete: if isAdmin();
+    }
+
+    // 4. Inventory Stock History Rules
+    match /stockHistory/{historyId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidStockHistory(incoming());
+      allow update, delete: if false;
+    }
+
+    // 5. Invoicing Collection Rules
+    match /invoices/{invoiceId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidInvoice(incoming()) && incoming().createdById == request.auth.uid;
+      
+      // Invoice edits are restricted to Admin and Super Admin roles.
+      allow update: if isAdmin() &&
+                    isValidInvoice(incoming()) &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().createdById == existing().createdById;
+      
+      // Only Admins or Super Admins can delete invoice listings
+      allow delete: if isAdmin();
+    }
+
+    // 6. Global Config & Settings Rules
+    match /settings/{settingsId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidShopSettings(incoming());
+    }
+
+    // 7. Customers Collection Rules
+    match /customers/{customerId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidCustomer(incoming());
+      allow update: if isSignedIn() && isValidCustomer(incoming()) &&
+                    incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin();
+    }
+  }
+}
