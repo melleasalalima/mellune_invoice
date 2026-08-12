@@ -5,7 +5,7 @@
 
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, enableIndexedDbPersistence } from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
 
 // Initialize Firebase
@@ -17,6 +17,19 @@ const firestoreDatabaseId = "firestoreDatabaseId" in firebaseConfig
 
 // Expose services
 export const db = firestoreDatabaseId ? getFirestore(app, firestoreDatabaseId) : getFirestore(app);
+
+// Enable IndexedDB persistence (offline cache) to reduce network reads.
+// If persistence cannot be enabled (e.g., multiple tabs), fail gracefully.
+enableIndexedDbPersistence(db).catch((err) => {
+  // Failed to enable persistence. Commonly: "failed-precondition" when multiple tabs open
+  if ((err as any)?.code === 'failed-precondition') {
+    console.warn('IndexedDB persistence failed: multiple tabs open. Continuing without persistence.');
+  } else if ((err as any)?.code === 'unimplemented') {
+    console.warn('IndexedDB persistence is not available in this browser.');
+  } else {
+    console.warn('IndexedDB persistence error:', err);
+  }
+});
 export const auth = getAuth();
 
 // --- FIRESTORE SECURE ERROR HANDLER ---

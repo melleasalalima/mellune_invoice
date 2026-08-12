@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { collection, onSnapshot, doc, deleteDoc, updateDoc, query, orderBy, serverTimestamp } from "firebase/firestore";
+import { collection, onSnapshot, doc, deleteDoc, updateDoc, query, orderBy, serverTimestamp, limit, getDocs, startAfter } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType } from "../lib/firebase";
 import { Invoice, PaymentStatus, ShippingStatus, InvoiceStatus, UserRole, UserProfile } from "../types";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure } from "../lib/units";
@@ -75,6 +75,10 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const PAGE_SIZE = 80;
+  const [lastInvoiceDoc, setLastInvoiceDoc] = useState<any | null>(null);
+  const [hasMoreInvoices, setHasMoreInvoices] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Search & Filter State
   const [searchQuery, setSearchQuery] = useState("");
@@ -148,7 +152,8 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
 
   // Real-time Firestore Sync
   useEffect(() => {
-    const q = query(collection(db, "invoices"), orderBy("createdAt", "desc"));
+    // Limit stream to most recent invoices (first page)
+    const q = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(PAGE_SIZE));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -157,6 +162,8 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
           invoiceData.push({ id: doc.id, ...doc.data() } as Invoice);
         });
         setInvoices(invoiceData);
+        setLastInvoiceDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+        setHasMoreInvoices(snapshot.size >= PAGE_SIZE);
         setLoading(false);
       },
       (err) => {
@@ -171,6 +178,24 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
 
     return () => unsubscribe();
   }, []);
+
+  const loadMoreInvoices = async () => {
+    if (!hasMoreInvoices || !lastInvoiceDoc) return;
+    setLoadingMore(true);
+    try {
+      const nextQ = query(collection(db, "invoices"), orderBy("createdAt", "desc"), startAfter(lastInvoiceDoc), limit(PAGE_SIZE));
+      const snap = await getDocs(nextQ);
+      const more: Invoice[] = [];
+      snap.forEach((d) => more.push({ id: d.id, ...d.data() } as Invoice));
+      setInvoices((prev) => [...prev, ...more]);
+      setLastInvoiceDoc(snap.docs[snap.docs.length - 1] || null);
+      setHasMoreInvoices(snap.size >= PAGE_SIZE);
+    } catch (err) {
+      console.warn('Failed to load more invoices', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const handleDeleteInvoice = (e: React.MouseEvent, invoiceId: string | undefined) => {
     e.stopPropagation();
@@ -891,6 +916,14 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {hasMoreInvoices && (
+        <div className="p-4 flex justify-center border-t border-slate-100 bg-white">
+          <button onClick={loadMoreInvoices} disabled={loadingMore} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-50">
+            {loadingMore ? "Loading..." : "Load more invoices"}
+          </button>
         </div>
       )}
 

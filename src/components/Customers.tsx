@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, getDocs } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, getDocs, limit, startAfter } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType } from "../lib/firebase";
 import { Customer, Invoice, UserProfile, UserRole, PaymentStatus } from "../types";
 import { 
@@ -39,6 +39,10 @@ interface CustomersProps {
 export default function Customers({ userProfile }: CustomersProps) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [aggregates, setAggregates] = useState<{ totalPaidRevenue?: number; totalCustomers?: number } | null>(null);
+  const PAGE_SIZE = 80;
+  const [lastCustomerDoc, setLastCustomerDoc] = useState<any | null>(null);
+  const [hasMoreCustomers, setHasMoreCustomers] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,8 +87,8 @@ export default function Customers({ userProfile }: CustomersProps) {
   useEffect(() => {
     setLoading(true);
     
-    // Subscribe to Customers
-    const qCustomers = query(collection(db, "customers"), orderBy("name", "asc"));
+    // Subscribe to Customers (first page only)
+    const qCustomers = query(collection(db, "customers"), orderBy("name", "asc"), limit(PAGE_SIZE));
     const unsubCustomers = onSnapshot(
       qCustomers,
       (snapshot) => {
@@ -93,6 +97,8 @@ export default function Customers({ userProfile }: CustomersProps) {
           customerList.push({ id: doc.id, ...doc.data() } as Customer);
         });
         setCustomers(customerList);
+        setLastCustomerDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+        setHasMoreCustomers(snapshot.size >= PAGE_SIZE);
         setLoading(false);
       },
       (err) => {
@@ -106,6 +112,7 @@ export default function Customers({ userProfile }: CustomersProps) {
     );
 
     // Subscribe to Invoices
+    // Limit realtime invoice listener to a window to avoid streaming the entire collection.
     const qInvoices = query(collection(db, "invoices"), orderBy("createdAt", "desc"));
     const unsubInvoices = onSnapshot(
       qInvoices,
@@ -129,6 +136,41 @@ export default function Customers({ userProfile }: CustomersProps) {
       unsubCustomers();
       unsubInvoices();
     };
+  }, []);
+
+  const loadMoreCustomers = async () => {
+    if (!hasMoreCustomers || !lastCustomerDoc) return;
+    try {
+      const nextQ = query(collection(db, "customers"), orderBy("name", "asc"), startAfter(lastCustomerDoc), limit(PAGE_SIZE));
+      const snap = await getDocs(nextQ);
+      const more: Customer[] = [];
+      snap.forEach((d) => more.push({ id: d.id, ...d.data() } as Customer));
+      setCustomers((prev) => [...prev, ...more]);
+      setLastCustomerDoc(snap.docs[snap.docs.length - 1] || null);
+      setHasMoreCustomers(snap.size >= PAGE_SIZE);
+    } catch (err) {
+      console.warn('Failed to load more customers', err);
+    }
+  };
+
+  // Subscribe to light-weight aggregates document for totals
+  useEffect(() => {
+    const aggRef = doc(db, "aggregates", "shopStats");
+    const unsubAgg = onSnapshot(aggRef, (snap) => {
+      if (!snap.exists()) {
+        setAggregates(null);
+        return;
+      }
+      const data = snap.data() as any;
+      setAggregates({
+        totalPaidRevenue: typeof data.totalPaidRevenue === 'number' ? data.totalPaidRevenue : undefined,
+        totalCustomers: typeof data.totalCustomers === 'number' ? data.totalCustomers : undefined,
+      });
+    }, (err) => {
+      console.warn('Failed to subscribe to aggregates/shopStats', err);
+    });
+
+    return () => unsubAgg();
   }, []);
 
   // Helper function to link customer and calculate dynamic spend metrics
@@ -255,8 +297,8 @@ export default function Customers({ userProfile }: CustomersProps) {
   });
 
   // Global Aggregate Stats
-  const totalPaidRevenue = invoices.filter(i => i.paymentStatus === PaymentStatus.PAID).reduce((sum, i) => sum + i.totalAmount, 0);
-  const totalCustomersCount = compiledCustomers.length;
+  const totalPaidRevenue = aggregates?.totalPaidRevenue ?? invoices.filter(i => i.paymentStatus === PaymentStatus.PAID).reduce((sum, i) => sum + i.totalAmount, 0);
+  const totalCustomersCount = aggregates?.totalCustomers ?? compiledCustomers.length;
   
   // Find highest spender
   const topSpenderObj = compiledCustomers.length > 0 

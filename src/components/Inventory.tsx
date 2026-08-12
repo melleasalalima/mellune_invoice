@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, where, writeBatch } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, where, writeBatch, limit } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType } from "../lib/firebase";
 import { InventoryItem, MeasurementUnit, SellingMeasure, StockHistoryEntry, UserRole, UserProfile } from "../types";
 import { BEADS_PRESETS, getPresetSvgDataUrl } from "../lib/beadsData";
@@ -187,7 +187,8 @@ export default function Inventory({ userProfile }: InventoryProps) {
 
   // Real-time Firestore sync
   useEffect(() => {
-    const q = query(collection(db, "inventory"), orderBy("sku", "asc"));
+    // Limit inventory realtime stream to a reasonable window to reduce reads.
+    const q = query(collection(db, "inventory"), orderBy("sku", "asc"), limit(500));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {

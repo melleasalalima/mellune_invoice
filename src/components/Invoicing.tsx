@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from "react";
-import { collection, onSnapshot, doc, setDoc, query, orderBy, serverTimestamp, getDocs } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, query, orderBy, serverTimestamp, getDocs, limit } from "firebase/firestore";
 import { db, handleFirestoreError, OperationType } from "../lib/firebase";
 import { Customer, InventoryItem, Invoice, InvoiceItem, PaymentStatus, UserProfile, UserRole, ShippingStatus, InvoiceStatus } from "../types";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure, getMeasurementLabel, getSellingUnitQuantity } from "../lib/units";
@@ -108,7 +108,8 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
 
   // Sync Customers directory
   useEffect(() => {
-    const q = query(collection(db, "customers"), orderBy("name", "asc"));
+    // Limit customers list used for quick pick to avoid streaming full directory.
+    const q = query(collection(db, "customers"), orderBy("name", "asc"), limit(250));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -127,7 +128,8 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
 
   // Sync products
   useEffect(() => {
-    const q = query(collection(db, "inventory"), orderBy("sku", "asc"));
+    // Limit product catalog snapshot to a page size to reduce reads and memory use.
+    const q = query(collection(db, "inventory"), orderBy("sku", "asc"), limit(500));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
