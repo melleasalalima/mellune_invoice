@@ -111,9 +111,8 @@ export default function Customers({ userProfile }: CustomersProps) {
       }
     );
 
-    // Subscribe to Invoices
-    // Limit realtime invoice listener to a window to avoid streaming the entire collection.
-    const qInvoices = query(collection(db, "invoices"), orderBy("createdAt", "desc"));
+    // Subscribe to Invoices - load recent 2000 invoices for customer metrics
+    const qInvoices = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(2000));
     const unsubInvoices = onSnapshot(
       qInvoices,
       (snapshot) => {
