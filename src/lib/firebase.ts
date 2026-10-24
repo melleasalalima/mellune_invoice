@@ -5,17 +5,29 @@
 
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { initializeFirestore, type FirestoreSettings } from "firebase/firestore";
+import {
+  initializeFirestore,
+  getDoc,
+  getDocFromCache,
+  getDocs,
+  getDocsFromCache,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type DocumentReference,
+  type Query,
+} from "firebase/firestore";
 import firebaseConfig from "../../firebase-applet-config.json";
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Configure Firestore with IndexedDB caching
-const firestoreSettings: FirestoreSettings = {
-  cache: {
-    size: 100 * 1024 * 1024, // 100MB local cache
-  }
+// Keep a bounded IndexedDB cache for offline use and reuse across app sessions.
+const firestoreSettings = {
+  experimentalAutoDetectLongPolling: true,
+  localCache: persistentLocalCache({
+    cacheSizeBytes: 100 * 1024 * 1024,
+    tabManager: persistentMultipleTabManager(),
+  }),
 };
 
 // Initialize Firestore with cache settings
@@ -31,6 +43,24 @@ export const db = initializeFirestore(
 );
 
 export const auth = getAuth();
+
+export async function getDocCacheFirst<T>(reference: DocumentReference<T>) {
+  try {
+    return await getDocFromCache(reference);
+  } catch {
+    return getDoc(reference);
+  }
+}
+
+export async function getDocsCacheFirst<T>(reference: Query<T>) {
+  try {
+    const cached = await getDocsFromCache(reference);
+    if (!cached.empty) return cached;
+  } catch {
+    // A first visit has no local copy yet; fetch it once from the server.
+  }
+  return getDocs(reference);
+}
 
 // --- FIRESTORE SECURE ERROR HANDLER ---
 export enum OperationType {

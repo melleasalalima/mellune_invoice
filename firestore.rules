@@ -218,5 +218,16 @@ service cloud.firestore {
                     incoming().createdAt == existing().createdAt;
       allow delete: if isAdmin();
     }
+
+    // Read-only summary documents used to display customer lifetime spend.
+    match /customerTotals/{customerKey} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /aggregates/{aggregateId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
   }
 }

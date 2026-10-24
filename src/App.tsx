@@ -3,18 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { lazy, Suspense, useState, useEffect } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "./lib/firebase";
 import { Invoice, UserProfile, UserRole } from "./types";
 import Login from "./components/Login";
-import Inventory from "./components/Inventory";
-import Invoicing from "./components/Invoicing";
-import InvoiceList from "./components/InvoiceList";
-import InvoiceReceipt from "./components/InvoiceReceipt";
-import Settings from "./components/Settings";
-import Customers from "./components/Customers";
+const Inventory = lazy(() => import("./components/Inventory"));
+const Invoicing = lazy(() => import("./components/Invoicing"));
+const InvoiceList = lazy(() => import("./components/InvoiceList"));
+const InvoiceReceipt = lazy(() => import("./components/InvoiceReceipt"));
+const Settings = lazy(() => import("./components/Settings"));
+const Customers = lazy(() => import("./components/Customers"));
+const DataExport = lazy(() => import("./components/DataExport"));
 import { 
   Store, 
   Layers, 
@@ -28,11 +29,12 @@ import {
   User, 
   Sparkles,
   HelpCircle,
-  Users
+  Users,
+  FileSpreadsheet
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-type ActiveTab = "inventory" | "create-invoice" | "invoice-list" | "settings" | "customers";
+type ActiveTab = "inventory" | "create-invoice" | "invoice-list" | "settings" | "customers" | "data-export";
 
 export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -292,6 +294,16 @@ export default function App() {
             <SettingsIcon className="w-4 h-4 shrink-0" />
             Shop Settings
           </button>
+
+          <button
+            onClick={() => { setActiveTab("data-export"); setActiveInvoiceId(null); }}
+            className={`w-full py-2.5 px-4 rounded-xl text-left text-xs font-bold font-display flex items-center gap-2.5 cursor-pointer leading-none transition-all ${
+              activeTab === "data-export" ? "bg-white text-slate-900 shadow-sm" : "text-zinc-400 hover:text-white hover:bg-white/5"
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4 shrink-0" />
+            Data Export
+          </button>
         </aside>
 
         {/* Dynamic Tab Panel Render block */}
@@ -304,6 +316,11 @@ export default function App() {
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.15 }}
             >
+              <Suspense fallback={
+                <div className="min-h-48 flex items-center justify-center text-xs font-mono text-slate-500">
+                  Loading workspace...
+                </div>
+              }>
               {activeTab === "inventory" && (
                 <Inventory userProfile={userProfile} />
               )}
@@ -342,6 +359,11 @@ export default function App() {
               {activeTab === "customers" && (
                 <Customers userProfile={userProfile} />
               )}
+
+              {activeTab === "data-export" && (
+                <DataExport userProfile={userProfile} />
+              )}
+              </Suspense>
             </motion.div>
           </AnimatePresence>
         </main>

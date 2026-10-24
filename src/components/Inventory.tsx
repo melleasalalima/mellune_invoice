@@ -4,12 +4,12 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, where, writeBatch, limit } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../lib/firebase";
+import { collection, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, where, writeBatch, limit, getDocsFromServer } from "firebase/firestore";
+import { db, getDocsCacheFirst, handleFirestoreError, OperationType } from "../lib/firebase";
 import { InventoryItem, MeasurementUnit, SellingMeasure, StockHistoryEntry, UserRole, UserProfile } from "../types";
 import { BEADS_PRESETS, getPresetSvgDataUrl } from "../lib/beadsData";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure, getMeasurementLabel, getMeasurementStep, MEASUREMENT_UNITS } from "../lib/units";
-import { Plus, Search, Trash2, Edit3, Image as ImageIcon, Sparkles, Filter, X, ChevronRight, AlertTriangle, Layers, History, WalletCards, Camera } from "lucide-react";
+import { Plus, Search, Trash2, Edit3, Image as ImageIcon, Sparkles, Filter, X, ChevronRight, AlertTriangle, Layers, History, WalletCards, Camera, RefreshCw } from "lucide-react";
 import ImageCropper from "./ImageCropper";
 
 interface InventoryProps {
@@ -30,6 +30,7 @@ const MARKUP_OPTIONS = [30, 40, 50, 60, 80, 100];
 
 type SellingMeasureDraft = {
   id: string;
+  label: string;
   quantity: number | "";
   markupPercent: number | "";
   price: number | "";
@@ -82,6 +83,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
   const [stockToAdd, setStockToAdd] = useState<number | "">("");
   const [measurementUnit, setMeasurementUnit] = useState<MeasurementUnit>("pc");
   const [sellingUnitQuantity, setSellingUnitQuantity] = useState<number | "">(1);
+  const [sellingMeasureLabel, setSellingMeasureLabel] = useState("");
   const [purchaseCost, setPurchaseCost] = useState<number | "">("");
   const [purchaseQuantity, setPurchaseQuantity] = useState<number | "">("");
   const [markupPercent, setMarkupPercent] = useState<number | "">("");
@@ -187,11 +189,11 @@ export default function Inventory({ userProfile }: InventoryProps) {
 
   // Real-time Firestore sync
   useEffect(() => {
-    // Limit inventory realtime stream to a reasonable window to reduce reads.
+    let isActive = true;
     const q = query(collection(db, "inventory"), orderBy("sku", "asc"), limit(500));
-    const unsubscribe = onSnapshot(
-      q,
+    getDocsCacheFirst(q).then(
       (snapshot) => {
+        if (!isActive) return;
         const itemData: InventoryItem[] = [];
         snapshot.forEach((doc) => {
           itemData.push({ id: doc.id, ...doc.data() } as InventoryItem);
@@ -200,6 +202,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
         setLoading(false);
       },
       (err) => {
+        if (!isActive) return;
         setLoading(false);
         try {
           handleFirestoreError(err, OperationType.GET, "inventory");
@@ -209,7 +212,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
       }
     );
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, []);
 
   useEffect(() => {
@@ -221,11 +224,13 @@ export default function Inventory({ userProfile }: InventoryProps) {
     setHistoryLoading(true);
     const historyQuery = query(
       collection(db, "stockHistory"),
-      where("sku", "==", selectedItem.sku)
+      where("sku", "==", selectedItem.sku),
+      limit(50)
     );
-    const unsubscribe = onSnapshot(
-      historyQuery,
+    let isActive = true;
+    getDocsCacheFirst(historyQuery).then(
       (snapshot) => {
+        if (!isActive) return;
         const entries = snapshot.docs
           .map((historyDoc) => ({ id: historyDoc.id, ...historyDoc.data() } as StockHistoryEntry))
           .sort((a, b) => {
@@ -237,12 +242,13 @@ export default function Inventory({ userProfile }: InventoryProps) {
         setHistoryLoading(false);
       },
       (err) => {
+        if (!isActive) return;
         console.error("Failed to load stock history:", err);
         setHistoryLoading(false);
       }
     );
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, [selectedItem]);
 
   const generateAutoSku = (catName: string) => {
@@ -290,6 +296,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
     setStockToAdd("");
     setMeasurementUnit("pc");
     setSellingUnitQuantity(1);
+    setSellingMeasureLabel("");
     setPurchaseCost("");
     setPurchaseQuantity("");
     setMarkupPercent("");
@@ -321,6 +328,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
     setStockToAdd("");
     setMeasurementUnit(item.measurementUnit || "pc");
     setSellingUnitQuantity(item.sellingUnitQuantity || 1);
+    setSellingMeasureLabel(item.sellingMeasures?.find((measure) => measure.quantity === (item.sellingUnitQuantity || 1) && measure.price === item.price)?.label || "");
     setPurchaseCost(item.purchaseCost ?? "");
     setPurchaseQuantity(item.purchaseQuantity ?? "");
     setMarkupPercent(item.markupPercent ?? "");
@@ -330,6 +338,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
         .filter((measure) => measure.quantity !== (item.sellingUnitQuantity || 1) || measure.price !== item.price)
         .map((measure, index) => ({
           id: `${item.id || item.sku}-${index}`,
+          label: measure.label || "",
           quantity: measure.quantity,
           markupPercent: measure.markupPercent,
           price: measure.price,
@@ -358,6 +367,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
     setStockToAdd("");
     setMeasurementUnit("pc");
     setSellingUnitQuantity(1);
+    setSellingMeasureLabel("");
     setPurchaseCost("");
     setPurchaseQuantity("");
     setMarkupPercent("");
@@ -526,6 +536,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
       ...measures,
       {
         id: crypto.randomUUID(),
+        label: "",
         quantity: "",
         markupPercent: markupPercent === "" ? "" : markupPercent,
         price: "",
@@ -535,8 +546,8 @@ export default function Inventory({ userProfile }: InventoryProps) {
 
   const updateSellingMeasure = (
     id: string,
-    field: "quantity" | "markupPercent" | "price",
-    value: number | ""
+    field: "label" | "quantity" | "markupPercent" | "price",
+    value: number | "" | string
   ) => {
     setAdditionalSellingMeasures((measures) =>
       measures.map((measure) => {
@@ -598,11 +609,13 @@ export default function Inventory({ userProfile }: InventoryProps) {
 
     const sellingMeasures: SellingMeasure[] = [
       {
+        label: sellingMeasureLabel.trim(),
         quantity: Number(sellingUnitQuantity),
         markupPercent: Number(markupPercent || 0),
         price: Number(price),
       },
       ...additionalSellingMeasures.map((measure) => ({
+        label: measure.label.trim(),
         quantity: Number(measure.quantity),
         markupPercent: Number(measure.markupPercent),
         price: Number(measure.price),
@@ -662,6 +675,17 @@ export default function Inventory({ userProfile }: InventoryProps) {
         createdAt: serverTimestamp(),
       });
       await batch.commit();
+      const savedItem = {
+        ...payload,
+        id: finalDocId,
+        createdAt: editingItem?.createdAt || new Date(),
+        updatedAt: new Date(),
+      } as InventoryItem;
+      setItems((current) => {
+        const existingIndex = current.findIndex((item) => item.id === finalDocId);
+        if (existingIndex < 0) return [...current, savedItem].sort((a, b) => a.sku.localeCompare(b.sku));
+        return current.map((item) => item.id === finalDocId ? savedItem : item);
+      });
       resetForm();
     } catch (err: any) {
       setError(err.message || "Failed to update stock item.");
@@ -676,6 +700,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
       async () => {
         try {
           await deleteDoc(doc(db, "inventory", docId));
+          setItems((current) => current.filter((item) => item.id !== docId));
         } catch (err: any) {
           setError(err.message || "Failed to delete item.");
         }
@@ -711,6 +736,22 @@ export default function Inventory({ userProfile }: InventoryProps) {
       await Promise.all(promises);
     } catch (err: any) {
       setError(err.message || "Could not seed inventories.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshInventory = async () => {
+    setLoading(true);
+    try {
+      const inventoryQuery = query(collection(db, "inventory"), orderBy("sku", "asc"), limit(500));
+      const snapshot = await getDocsFromServer(inventoryQuery);
+      setItems(snapshot.docs.map((inventoryDoc) => ({
+        id: inventoryDoc.id,
+        ...inventoryDoc.data(),
+      } as InventoryItem)));
+    } catch (err: any) {
+      setError(err.message || "Failed to refresh inventory.");
     } finally {
       setLoading(false);
     }
@@ -783,6 +824,16 @@ export default function Inventory({ userProfile }: InventoryProps) {
         </div>
 
         <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={refreshInventory}
+            disabled={loading}
+            title="Fetch the latest inventory from Firebase"
+            className="py-2.5 px-3 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-2 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh stock
+          </button>
           {hasWriteAccess && items.length === 0 && (
             <button
               onClick={handleLoadSampleInventory}
@@ -1286,7 +1337,7 @@ export default function Inventory({ userProfile }: InventoryProps) {
                       >
                         <div>
                           <span className="block text-xs font-bold text-slate-800">
-                            {formatSellingMeasure(measure.quantity, selectedItem.measurementUnit)}
+                            {measure.label ? `${measure.label} - ` : ""}{formatSellingMeasure(measure.quantity, selectedItem.measurementUnit)}
                           </span>
                           <span className="text-[9px] text-slate-400">Selling option {index + 1}</span>
                         </div>
@@ -1663,7 +1714,17 @@ export default function Inventory({ userProfile }: InventoryProps) {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
+                    <div>
+                      <label className="block text-[10px] font-bold text-stone-600 uppercase mb-1">Selling Label</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Per strand"
+                        value={sellingMeasureLabel}
+                        onChange={(e) => setSellingMeasureLabel(e.target.value)}
+                        className="w-full px-3 py-2 border border-stone-250 bg-white rounded-xl text-xs focus:border-stone-900 outline-none"
+                      />
+                    </div>
                     <div>
                       <label className="block text-[10px] font-bold text-stone-600 uppercase mb-1">Selling Measure</label>
                       <div className="flex">
@@ -1728,7 +1789,17 @@ export default function Inventory({ userProfile }: InventoryProps) {
                     <div className="mt-3 space-y-2">
                       <span className="block text-[9px] font-bold uppercase text-stone-400">Additional Selling Measures</span>
                       {additionalSellingMeasures.map((measure, index) => (
-                        <div key={measure.id} className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end bg-white border border-stone-200 rounded-xl p-2.5">
+                        <div key={measure.id} className="grid grid-cols-1 sm:grid-cols-[1.2fr_1fr_1fr_1fr_auto] gap-2 items-end bg-white border border-stone-200 rounded-xl p-2.5">
+                          <div>
+                            <label className="block text-[9px] font-bold text-stone-500 uppercase mb-1">Selling Label</label>
+                            <input
+                              type="text"
+                              placeholder={`Measure ${index + 2}`}
+                              value={measure.label}
+                              onChange={(e) => updateSellingMeasure(measure.id, "label", e.target.value)}
+                              className="w-full px-2.5 py-2 border border-stone-250 rounded-lg text-xs outline-none focus:border-stone-900"
+                            />
+                          </div>
                           <div>
                             <label className="block text-[9px] font-bold text-stone-500 uppercase mb-1">Measure {index + 2}</label>
                             <div className="flex">

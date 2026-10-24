@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { doc, getDoc, setDoc, serverTimestamp, collection, query, orderBy, onSnapshot, updateDoc } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../lib/firebase";
+import { doc, getDoc, setDoc, serverTimestamp, collection, query, orderBy, limit, updateDoc } from "firebase/firestore";
+import { db, getDocCacheFirst, getDocsCacheFirst, handleFirestoreError, OperationType } from "../lib/firebase";
 import { PaymentMethod, ShopSettings, UserRole, UserProfile } from "../types";
 import { Settings as SettingsIcon, Save, Sparkles, Coins, Landmark, FileText, UserPlus, ShieldAlert, CheckCircle, RefreshCw, QrCode, Download, Upload, X } from "lucide-react";
 import ImageCropper from "./ImageCropper";
@@ -80,7 +80,9 @@ export default function Settings({ userProfile }: SettingsProps) {
   // 1. Sync Shop settings
   useEffect(() => {
     const settingsRef = doc(db, "settings", "shop");
-    const unsubscribe = onSnapshot(settingsRef, (snap) => {
+    let isActive = true;
+    getDocCacheFirst(settingsRef).then((snap) => {
+      if (!isActive) return;
       if (snap.exists()) {
         const data = snap.data() as ShopSettings;
         setShopName(data.shopName || "");
@@ -99,9 +101,13 @@ export default function Settings({ userProfile }: SettingsProps) {
         setChatTemplate(DEFAULT_CHAT_TEMPLATE);
       }
       setLoading(false);
+    }).catch((err) => {
+      if (!isActive) return;
+      setLoading(false);
+      setError(err.message || "Failed to load shop settings.");
     });
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, []);
 
   const updatePaymentMethod = (id: PaymentMethod["id"], changes: Partial<PaymentMethod>) => {
@@ -132,10 +138,11 @@ export default function Settings({ userProfile }: SettingsProps) {
   useEffect(() => {
     if (!isSuperAdmin) return;
     setLoadingStaff(true);
-    const q = query(collection(db, "users"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(
-      q,
+    let isActive = true;
+    const q = query(collection(db, "users"), orderBy("createdAt", "desc"), limit(100));
+    getDocsCacheFirst(q).then(
       (snapshot) => {
+        if (!isActive) return;
         const users: UserProfile[] = [];
         snapshot.forEach((doc) => {
           users.push({ uid: doc.id, ...doc.data() } as UserProfile);
@@ -144,12 +151,13 @@ export default function Settings({ userProfile }: SettingsProps) {
         setLoadingStaff(false);
       },
       (err) => {
+        if (!isActive) return;
         setLoadingStaff(false);
         console.error("Failed to read user roster in live server, fallback bypass active", err);
       }
     );
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, [isSuperAdmin]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {

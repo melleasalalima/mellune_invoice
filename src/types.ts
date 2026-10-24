@@ -51,6 +51,7 @@ export interface InvoiceItem {
   quantity: number;
   measurementUnit?: MeasurementUnit;
   sellingUnitQuantity?: number;
+  sellingMeasureLabel?: string;
   pricingKey?: string;
   imageUrl: string;
 }
@@ -58,10 +59,13 @@ export interface InvoiceItem {
 export type MeasurementUnit = "pc" | "ml" | "grams";
 
 export interface SellingMeasure {
+  label?: string;
   quantity: number;
   markupPercent: number;
   price: number;
 }
+
+export type InvoicePaymentTerms = "Pay First" | "COD";
 
 export type StockHistoryAction = "created" | "stock_added" | "stock_removed" | "updated";
 
@@ -113,6 +117,7 @@ export interface Invoice {
   amountPaid?: number;
   previousBalance?: number;
   paymentStatus: PaymentStatus;
+  paymentTerms?: InvoicePaymentTerms;
   paymentMethod: string; // GCash, Bank Transfer, Cash, Card
   createdById: string;
   createdByEmail: string;

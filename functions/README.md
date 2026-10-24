@@ -2,6 +2,7 @@ This folder contains example Firebase Cloud Functions to maintain lightweight ag
 
 - `onInvoiceWrite`: maintains `aggregates/shopStats.totalPaidRevenue` and `totalInvoices` incrementally when invoices are created/updated/deleted.
 - `onCustomerWrite`: maintains `aggregates/shopStats.totalCustomers` incrementally when customers are created/deleted.
+- `backfill-customer-totals.js`: rebuilds lifetime customer spend/order totals from existing invoices when explicitly run.
 
 To deploy:
 
@@ -18,3 +19,6 @@ firebase deploy --only functions
 Notes:
 - These functions incrementally update aggregates to avoid full-collection reads in the client.
 - You can expand to track additional aggregates (topSpender, paidCounts, etc.) as needed.
+- Deploy the corrected invoice trigger before relying on lifetime customer totals: `firebase deploy --only functions`.
+- Existing invoice totals require a one-time backfill. From this folder, run `node backfill-customer-totals.js --apply` using Firebase Admin credentials. Without `--apply`, the script performs no reads or writes.
+- The backfill reads every invoice once, so it uses approximately one Firestore document read per invoice. Wait until the daily quota resets if the project is near its free limit.

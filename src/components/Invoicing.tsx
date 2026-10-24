@@ -4,9 +4,9 @@
  */
 
 import React, { useState, useEffect, useRef } from "react";
-import { collection, onSnapshot, doc, setDoc, query, orderBy, serverTimestamp, getDocs, limit } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../lib/firebase";
-import { Customer, InventoryItem, Invoice, InvoiceItem, PaymentStatus, UserProfile, UserRole, ShippingStatus, InvoiceStatus } from "../types";
+import { collection, doc, setDoc, query, orderBy, serverTimestamp, getDocs, limit } from "firebase/firestore";
+import { db, getDocsCacheFirst, handleFirestoreError, OperationType } from "../lib/firebase";
+import { Customer, InventoryItem, Invoice, InvoiceItem, InvoicePaymentTerms, PaymentStatus, UserProfile, UserRole, ShippingStatus, InvoiceStatus } from "../types";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure, getMeasurementLabel, getSellingUnitQuantity } from "../lib/units";
 import { Plus, Search, Trash2, User, Phone, Mail, Check, AlertTriangle, Layers, ChevronDown, Camera, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -52,6 +52,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
   // Transaction Lines
   const [addedItems, setAddedItems] = useState<InvoiceItem[]>([]);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("GCash");
+  const [paymentTerms, setPaymentTerms] = useState<InvoicePaymentTerms>("Pay First");
   const [amountPaid, setAmountPaid] = useState(0);
   const [previousBalance, setPreviousBalance] = useState(0);
   const [shippingStatus, setShippingStatus] = useState<ShippingStatus>(ShippingStatus.PENDING);
@@ -95,6 +96,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
       pricingKey: item.pricingKey || createLineId(item.sku),
     })));
     setSelectedPaymentMethod(editingInvoice.paymentMethod || "GCash");
+    setPaymentTerms(editingInvoice.paymentTerms || "Pay First");
     setAmountPaid(
       editingInvoice.amountPaid ??
       (editingInvoice.paymentStatus === PaymentStatus.PAID ? editingInvoice.totalAmount : 0)
@@ -108,11 +110,11 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
 
   // Sync Customers directory
   useEffect(() => {
-    // Limit customers list used for quick pick to avoid streaming full directory.
+    let isActive = true;
     const q = query(collection(db, "customers"), orderBy("name", "asc"), limit(250));
-    const unsubscribe = onSnapshot(
-      q,
+    getDocsCacheFirst(q).then(
       (snapshot) => {
+        if (!isActive) return;
         const list: Customer[] = [];
         snapshot.forEach((doc) => {
           list.push({ id: doc.id, ...doc.data() } as Customer);
@@ -120,19 +122,19 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
         setCustomers(list);
       },
       (err) => {
-        console.error("Non-blocking fail loading customers list in checkout:", err);
+        if (isActive) console.error("Non-blocking fail loading customers list in checkout:", err);
       }
     );
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, []);
 
   // Sync products
   useEffect(() => {
-    // Limit product catalog snapshot to a page size to reduce reads and memory use.
+    let isActive = true;
     const q = query(collection(db, "inventory"), orderBy("sku", "asc"), limit(500));
-    const unsubscribe = onSnapshot(
-      q,
+    getDocsCacheFirst(q).then(
       (snapshot) => {
+        if (!isActive) return;
         const itemData: InventoryItem[] = [];
         snapshot.forEach((doc) => {
           itemData.push({ id: doc.id, ...doc.data() } as InventoryItem);
@@ -141,6 +143,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
         setLoading(false);
       },
       (err) => {
+        if (!isActive) return;
         setLoading(false);
         try {
           handleFirestoreError(err, OperationType.GET, "inventory");
@@ -150,7 +153,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
       }
     );
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, []);
 
   const getItemSellingMeasures = (item: InventoryItem) =>
@@ -196,6 +199,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
           quantity: sellingIncrement,
           measurementUnit: catalogItem.measurementUnit || "pc",
           sellingUnitQuantity: sellingIncrement,
+          sellingMeasureLabel: selectedMeasure.label || "",
           pricingKey: createLineId(catalogItem.sku),
           imageUrl: catalogItem.imageUrl,
         },
@@ -394,9 +398,16 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
 
       let invoiceNum = editingInvoice?.invoiceNumber;
       if (!invoiceNum) {
-        const invoiceSnapshot = await getDocs(collection(db, "invoices"));
-        const seqIndex = invoiceSnapshot.size + 1001;
-        invoiceNum = `INV-${seqIndex}`;
+        const latestInvoiceQuery = query(
+          collection(db, "invoices"),
+          orderBy("createdAt", "desc"),
+          limit(1)
+        );
+        const latestInvoiceSnapshot = await getDocs(latestInvoiceQuery);
+        const latestInvoiceNumber = latestInvoiceSnapshot.docs[0]?.data().invoiceNumber as string | undefined;
+        const latestSequence = latestInvoiceNumber?.match(/^INV-(\d+)$/i);
+        const nextSequence = latestSequence ? Number(latestSequence[1]) + 1 : latestInvoiceSnapshot.empty ? 1001 : Date.now();
+        invoiceNum = `INV-${nextSequence}`;
       }
 
       const generatedDocId = editingInvoice?.id || `inv_${Date.now()}`;
@@ -406,21 +417,35 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
         ? `cust_${customerPhone.replace(/\D/g, "")}`
         : `cust_${customerName.trim().toLowerCase().replace(/[^a-z0-9]/g, "")}`;
 
-      // Persist a customer record whenever a new invoice is created with a name.
-      await setDoc(
-        doc(db, "customers", normalizedCustomerId),
-        {
-          name: customerName.trim(),
-          email: customerEmail.trim(),
-          phone: customerPhone.trim(),
-          facebookName: customerFacebookName.trim(),
-          tier: "Standard",
-          notes: "",
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const customerAlreadyLoaded = customers.some((customer) => customer.id === normalizedCustomerId);
+      if (!isEditing && !customerAlreadyLoaded) {
+        // Create a customer record once; invoice edits and repeat sales don't need this extra write.
+        await setDoc(
+          doc(db, "customers", normalizedCustomerId),
+          {
+            name: customerName.trim(),
+            email: customerEmail.trim(),
+            phone: customerPhone.trim(),
+            facebookName: customerFacebookName.trim(),
+            tier: "Standard",
+            notes: "",
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+        setCustomers((current) => current.some((customer) => customer.id === normalizedCustomerId)
+          ? current
+          : [...current, {
+              id: normalizedCustomerId,
+              name: customerName.trim(),
+              email: customerEmail.trim(),
+              phone: customerPhone.trim(),
+              facebookName: customerFacebookName.trim(),
+              tier: "Standard",
+              notes: "",
+            } as Customer]);
+      }
 
       // 2. Format details
       const newInvoice: Omit<Invoice, "id"> = {
@@ -436,6 +461,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
         paymentStatus: editingInvoice?.paymentStatus === PaymentStatus.CANCELLED
           ? PaymentStatus.CANCELLED
           : calculatedPaymentStatus,
+        paymentTerms,
         paymentMethod: selectedPaymentMethod,
         createdById: editingInvoice?.createdById || userProfile.uid,
         createdByEmail: editingInvoice?.createdByEmail || userProfile.email,
@@ -660,7 +686,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
                           >
                             {measures.map((measure, index) => (
                               <option key={`${measure.quantity}-${measure.price}-${index}`} value={index}>
-                                {formatSellingMeasure(measure.quantity, p.measurementUnit)} - ₱{measure.price.toFixed(2)}
+                                {measure.label ? `${measure.label} - ` : ""}{formatSellingMeasure(measure.quantity, p.measurementUnit)} - ₱{measure.price.toFixed(2)}
                               </option>
                             ))}
                           </select>
@@ -862,6 +888,26 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
                 </div>
               </div>
 
+              <div>
+                <label className="block text-[10px] font-bold uppercase text-zinc-400 mb-1 tracking-wider">Invoice Payment Terms</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(["Pay First", "COD"] as InvoicePaymentTerms[]).map((terms) => (
+                    <button
+                      key={terms}
+                      type="button"
+                      onClick={() => setPaymentTerms(terms)}
+                      className={`py-2 px-3 border rounded-xl text-[10px] font-bold text-center cursor-pointer transition-all ${
+                        paymentTerms === terms
+                          ? "bg-rose-500 border-rose-600 text-white shadow-xs"
+                          : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white"
+                      }`}
+                    >
+                      {terms}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Shipping Status Selection */}
               <div>
                 <label className="block text-[10px] font-bold uppercase text-zinc-400 mb-1 tracking-wider">Shipping Status</label>
@@ -1002,7 +1048,7 @@ export default function Invoicing({ userProfile, onInvoiceCreated, editingInvoic
                             Measured in {getMeasurementLabel(line.measurementUnit)}
                           </span>
                           <p className="text-[10px] text-zinc-400 font-mono">
-                            ₱{line.price.toFixed(2)} / {formatSellingMeasure(line.sellingUnitQuantity, line.measurementUnit)}
+                            ₱{line.price.toFixed(2)} / {line.sellingMeasureLabel ? `${line.sellingMeasureLabel} - ` : ""}{formatSellingMeasure(line.sellingUnitQuantity, line.measurementUnit)}
                           </p>
                           <div className="mt-2 grid grid-cols-2 gap-2">
                             <label className="text-[8px] uppercase text-zinc-500">

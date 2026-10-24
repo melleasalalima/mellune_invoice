@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { doc } from "firebase/firestore";
+import { db, getDocCacheFirst } from "../lib/firebase";
 import { Invoice, InvoiceStatus, PaymentMethod, PaymentStatus, ShopSettings } from "../types";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure } from "../lib/units";
 import { toPng } from "html-to-image";
@@ -66,16 +66,23 @@ export default function InvoiceReceipt({ invoiceId, onGoBack }: InvoiceReceiptPr
 
     // 1. Sync selected invoice
     const invoiceRef = doc(db, "invoices", invoiceId);
-    const unsubInvoice = onSnapshot(invoiceRef, (snap) => {
+    let isActive = true;
+    getDocCacheFirst(invoiceRef).then((snap) => {
+      if (!isActive) return;
       if (snap.exists()) {
         setInvoice({ id: snap.id, ...snap.data() } as Invoice);
       }
+      setLoading(false);
+    }).catch((err) => {
+      if (!isActive) return;
+      setError(err.message || "Failed to load invoice.");
       setLoading(false);
     });
 
     // 2. Fetch or fallback global shop settings for receipts branding
     const settingsRef = doc(db, "settings", "shop");
-    const unsubSettings = onSnapshot(settingsRef, (snap) => {
+    getDocCacheFirst(settingsRef).then((snap) => {
+      if (!isActive) return;
       if (snap.exists()) {
         setSettings(snap.data() as ShopSettings);
       } else {
@@ -94,11 +101,14 @@ export default function InvoiceReceipt({ invoiceId, onGoBack }: InvoiceReceiptPr
         });
       }
       setSettingsLoading(false);
+    }).catch((err) => {
+      if (!isActive) return;
+      setError(err.message || "Failed to load shop settings.");
+      setSettingsLoading(false);
     });
 
     return () => {
-      unsubInvoice();
-      unsubSettings();
+      isActive = false;
     };
   }, [invoiceId]);
 
@@ -147,6 +157,7 @@ export default function InvoiceReceipt({ invoiceId, onGoBack }: InvoiceReceiptPr
     template = template.replace(/{GCASH_NAME}/g, settings.gcashName || "N/A");
     template = template.replace(/{BANK_DETAILS}/g, settings.bankDetails || "N/A");
     template = template.replace(/{PAYMENT_CHANNELS}/g, paymentChannels || "N/A");
+    template = template.replace(/{PAYMENT_TERMS}/g, invoice.paymentTerms || "Pay First");
 
     if (!settings.chatTemplate?.includes("{BALANCE}")) {
       const paymentSummary = `DP / Paid: ₱${paidAmount.toFixed(2)}
@@ -570,6 +581,10 @@ Total Due: ₱${amountDue.toFixed(2)}
                     {invoice.createdByEmail}
                   </span>
                 </div>
+                <div className="mt-1.5">
+                  <span className="block text-[9px] font-mono uppercase tracking-wider text-stone-400">Payment Terms:</span>
+                  <span className="text-stone-705 text-xs font-semibold block mt-1">{invoice.paymentTerms || "Pay First"}</span>
+                </div>
               </div>
             </div>
 
@@ -607,7 +622,7 @@ Total Due: ₱${amountDue.toFixed(2)}
                         ₱{calculateMeasuredLineTotal(item.price, item.quantity, item.sellingUnitQuantity).toFixed(2)}
                       </span>
                       <div className="text-[10px] font-mono text-stone-450 mt-0.5">
-                        {formatMeasuredQuantity(item.quantity, item.measurementUnit)} @ ₱{item.price.toFixed(2)} per {formatSellingMeasure(item.sellingUnitQuantity, item.measurementUnit)}
+                        {formatMeasuredQuantity(item.quantity, item.measurementUnit)} @ ₱{item.price.toFixed(2)} per {item.sellingMeasureLabel ? `${item.sellingMeasureLabel} - ` : ""}{formatSellingMeasure(item.sellingUnitQuantity, item.measurementUnit)}
                       </div>
                     </div>
                   </div>

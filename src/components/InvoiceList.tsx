@@ -4,11 +4,11 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { collection, onSnapshot, doc, deleteDoc, updateDoc, query, orderBy, serverTimestamp, limit, getDocs, startAfter } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../lib/firebase";
+import { collection, doc, deleteDoc, updateDoc, query, orderBy, serverTimestamp, limit, getDocsFromServer, startAfter } from "firebase/firestore";
+import { db, getDocsCacheFirst, handleFirestoreError, OperationType } from "../lib/firebase";
 import { Invoice, PaymentStatus, ShippingStatus, InvoiceStatus, UserRole, UserProfile } from "../types";
 import { calculateMeasuredLineTotal, formatMeasuredQuantity, formatSellingMeasure } from "../lib/units";
-import { Search, Trash2, Eye, AlertTriangle, CheckCircle, Clock, XCircle, FileText, Pencil, Save, X } from "lucide-react";
+import { Search, Trash2, Eye, AlertTriangle, CheckCircle, Clock, XCircle, FileText, Pencil, Save, X, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 
 interface InvoiceListProps {
   userProfile: UserProfile;
@@ -17,6 +17,7 @@ interface InvoiceListProps {
 }
 
 type DateRangeFilter = "All" | "Today" | "Yesterday" | "Week" | "Month" | "Custom";
+type InvoiceSortKey = "invoiceNumber" | "date" | "customer" | "shipping" | "payment" | "daysUnpaid" | "invoiceStatus";
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
@@ -85,6 +86,11 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
   const [statusFilter, setStatusFilter] = useState("All");
   const [shippingFilter, setShippingFilter] = useState("All");
   const [invoiceStatusFilter, setInvoiceStatusFilter] = useState("All");
+  const [invoiceNumberFilter, setInvoiceNumberFilter] = useState("");
+  const [customerFilter, setCustomerFilter] = useState("");
+  const [headerDateFilter, setHeaderDateFilter] = useState("");
+  const [sortKey, setSortKey] = useState<InvoiceSortKey>("date");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [dateRangeFilter, setDateRangeFilter] = useState<DateRangeFilter>("All");
   const [customStartDate, setCustomStartDate] = useState("");
   const [customEndDate, setCustomEndDate] = useState("");
@@ -142,6 +148,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         invoiceStatus: editingInvoice.invoiceStatus || InvoiceStatus.PENDING,
         updatedAt: serverTimestamp(),
       });
+      setInvoices((current) => current.map((invoice) => invoice.id === editingInvoice.id
+        ? { ...invoice, ...editingInvoice }
+        : invoice));
       setEditingInvoice(null);
     } catch (err: any) {
       setError(err.message || "Failed to update invoice.");
@@ -150,13 +159,13 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
     }
   };
 
-  // Real-time Firestore Sync
+  // Fetch the newest invoice page from the server; use cache only when offline.
   useEffect(() => {
-    // Limit stream to most recent invoices (first page)
+    let isActive = true;
     const q = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(PAGE_SIZE));
-    const unsubscribe = onSnapshot(
-      q,
+    getDocsFromServer(q).catch(() => getDocsCacheFirst(q)).then(
       (snapshot) => {
+        if (!isActive) return;
         const invoiceData: Invoice[] = [];
         snapshot.forEach((doc) => {
           invoiceData.push({ id: doc.id, ...doc.data() } as Invoice);
@@ -167,6 +176,7 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         setLoading(false);
       },
       (err) => {
+        if (!isActive) return;
         setLoading(false);
         try {
           handleFirestoreError(err, OperationType.GET, "invoices");
@@ -176,15 +186,31 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
       }
     );
 
-    return () => unsubscribe();
+    return () => { isActive = false; };
   }, []);
+
+  const refreshInvoices = async () => {
+    setLoading(true);
+    try {
+      const q = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(PAGE_SIZE));
+      const snapshot = await getDocsFromServer(q);
+      const invoiceData = snapshot.docs.map((invoiceDoc) => ({ id: invoiceDoc.id, ...invoiceDoc.data() } as Invoice));
+      setInvoices(invoiceData);
+      setLastInvoiceDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreInvoices(snapshot.size >= PAGE_SIZE);
+    } catch (err: any) {
+      setError(err.message || "Failed to refresh invoices.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const loadMoreInvoices = async () => {
     if (!hasMoreInvoices || !lastInvoiceDoc) return;
     setLoadingMore(true);
     try {
       const nextQ = query(collection(db, "invoices"), orderBy("createdAt", "desc"), startAfter(lastInvoiceDoc), limit(PAGE_SIZE));
-      const snap = await getDocs(nextQ);
+      const snap = await getDocsCacheFirst(nextQ);
       const more: Invoice[] = [];
       snap.forEach((d) => more.push({ id: d.id, ...d.data() } as Invoice));
       setInvoices((prev) => [...prev, ...more]);
@@ -212,6 +238,7 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
       async () => {
         try {
           await deleteDoc(doc(db, "invoices", invoiceId));
+          setInvoices((current) => current.filter((invoice) => invoice.id !== invoiceId));
         } catch (err: any) {
           setError(err.message || "Failed to delete record.");
         }
@@ -245,6 +272,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         amountPaid: nextAmountPaid,
         updatedAt: serverTimestamp(),
       });
+      setInvoices((current) => current.map((item) => item.id === invoice.id
+        ? { ...item, paymentStatus: newStatus, amountPaid: nextAmountPaid }
+        : item));
     } catch (err: any) {
       setError(err.message || "Failed to update payment status.");
     }
@@ -276,6 +306,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         amountPaid: nextAmountPaid,
         updatedAt: serverTimestamp(),
       });
+      setInvoices((current) => current.map((item) => item.id === invoice.id
+        ? { ...item, paymentStatus: newStatus, amountPaid: nextAmountPaid }
+        : item));
     } catch (err: any) {
       setError(err.message || "Failed to update payment status.");
     }
@@ -294,6 +327,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         shippingStatus: newStatus,
         updatedAt: serverTimestamp(),
       });
+      setInvoices((current) => current.map((item) => item.id === invoice.id
+        ? { ...item, shippingStatus: newStatus }
+        : item));
     } catch (err: any) {
       setError(err.message || "Failed to update shipping status.");
     }
@@ -312,6 +348,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
         invoiceStatus: newStatus,
         updatedAt: serverTimestamp(),
       });
+      setInvoices((current) => current.map((item) => item.id === invoice.id
+        ? { ...item, invoiceStatus: newStatus }
+        : item));
     } catch (err: any) {
       setError(err.message || "Failed to update invoice status.");
     }
@@ -354,6 +393,9 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
       inv.customerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       inv.invoiceNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (inv.createdByEmail && inv.createdByEmail.toLowerCase().includes(searchQuery.toLowerCase()));
+    const matchesInvoiceNumber = inv.invoiceNumber.toLowerCase().includes(invoiceNumberFilter.trim().toLowerCase());
+    const matchesCustomer = inv.customerName.toLowerCase().includes(customerFilter.trim().toLowerCase());
+    const matchesHeaderDate = !headerDateFilter || toDateInputValue(invoiceDate) === headerDateFilter;
 
     const matchesStatus = statusFilter === "All" || inv.paymentStatus === statusFilter;
     const matchesShipping = shippingFilter === "All" || (inv.shippingStatus || ShippingStatus.PENDING) === shippingFilter;
@@ -365,8 +407,57 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
       unpaidRange.value === "All" ||
       ((unpaidRange.min === null || daysUnpaid >= unpaidRange.min) && (unpaidRange.max === null || daysUnpaid <= unpaidRange.max));
 
-    return matchesSearch && matchesStatus && matchesShipping && matchesInvoiceStatus && matchesDateRange && matchesDaysUnpaid;
+    return matchesSearch && matchesInvoiceNumber && matchesCustomer && matchesHeaderDate && matchesStatus && matchesShipping && matchesInvoiceStatus && matchesDateRange && matchesDaysUnpaid;
   });
+
+  const sortedInvoices = [...filteredInvoices].sort((left, right) => {
+    let comparison = 0;
+    switch (sortKey) {
+      case "invoiceNumber":
+        comparison = left.invoiceNumber.localeCompare(right.invoiceNumber, undefined, { numeric: true });
+        break;
+      case "date":
+        comparison = getInvoiceDate(left).getTime() - getInvoiceDate(right).getTime();
+        break;
+      case "customer":
+        comparison = left.customerName.localeCompare(right.customerName);
+        break;
+      case "shipping":
+        comparison = (left.shippingStatus || ShippingStatus.PENDING).localeCompare(right.shippingStatus || ShippingStatus.PENDING);
+        break;
+      case "payment":
+        comparison = left.paymentStatus.localeCompare(right.paymentStatus);
+        break;
+      case "daysUnpaid":
+        comparison = getDaysUnpaid(left) - getDaysUnpaid(right);
+        break;
+      case "invoiceStatus":
+        comparison = (left.invoiceStatus || InvoiceStatus.PENDING).localeCompare(right.invoiceStatus || InvoiceStatus.PENDING);
+        break;
+    }
+    return comparison * (sortDirection === "asc" ? 1 : -1);
+  });
+
+  const changeSort = (nextKey: InvoiceSortKey) => {
+    if (sortKey === nextKey) {
+      setSortDirection((direction) => direction === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortKey(nextKey);
+    setSortDirection(nextKey === "date" ? "desc" : "asc");
+  };
+
+  const renderSortHeader = (label: string, key: InvoiceSortKey, className = "") => (
+    <button
+      type="button"
+      onClick={() => changeSort(key)}
+      aria-label={`Sort loaded invoices by ${label}, currently ${sortKey === key ? sortDirection === "asc" ? "ascending" : "descending" : "not sorted"}`}
+      className={`inline-flex items-center gap-1 hover:text-slate-900 ${className}`}
+    >
+      {label}
+      {sortKey === key ? sortDirection === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" /> : null}
+    </button>
+  );
 
   const financialSummary = filteredInvoices.reduce(
     (summary, invoice) => {
@@ -421,6 +512,11 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
             className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-205 outline-none text-slate-800 rounded-xl text-xs focus:bg-white focus:border-rose-400 transition-colors"
           />
         </div>
+
+        <button type="button" onClick={refreshInvoices} disabled={loading} title="Fetch the latest invoices from Firebase" aria-label="Refresh invoices from Firebase" className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
 
         {/* Status Tab buttons */}
         <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 shrink-0">
@@ -537,7 +633,7 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h3 className="text-xs font-black uppercase tracking-wider text-slate-800">Filtered Financial Summary</h3>
-              <p className="text-[9px] text-slate-400">{filteredInvoices.length} matching invoices</p>
+              <p className="text-[9px] text-slate-400">{filteredInvoices.length} matching loaded invoices</p>
             </div>
           </div>
           <div className="space-y-2">
@@ -578,18 +674,50 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-slate-450 font-mono text-[9px] uppercase font-bold tracking-wider">
-                  <th className="py-4 px-6">Invoice #</th>
-                  <th className="py-4 px-6">Order Date</th>
-                  <th className="py-4 px-6">Customer</th>
-                  <th className="py-4 px-4 text-center">Shipping</th>
-                  <th className="py-4 px-4 text-center">Payment Status</th>
-                  <th className="py-4 px-4 text-center">Days Unpaid</th>
-                  <th className="py-4 px-4 text-center">Invoice Status</th>
+                  <th className="min-w-32 py-3 px-4">
+                    {renderSortHeader("Invoice #", "invoiceNumber")}
+                    <input value={invoiceNumberFilter} onChange={(event) => setInvoiceNumberFilter(event.target.value)} placeholder="Filter #" aria-label="Filter by invoice number" className="mt-2 block w-full min-w-20 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400" />
+                  </th>
+                  <th className="min-w-36 py-3 px-4">
+                    {renderSortHeader("Order Date", "date")}
+                    <input type="date" value={headerDateFilter} onChange={(event) => setHeaderDateFilter(event.target.value)} aria-label="Filter by exact order date" className="mt-2 block w-full min-w-28 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400" />
+                  </th>
+                  <th className="min-w-36 py-3 px-4">
+                    {renderSortHeader("Customer", "customer")}
+                    <input value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)} placeholder="Filter customer" aria-label="Filter by customer" className="mt-2 block w-full min-w-24 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400" />
+                  </th>
+                  <th className="min-w-28 py-3 px-3 text-center">
+                    {renderSortHeader("Shipping", "shipping")}
+                    <select value={shippingFilter} onChange={(event) => setShippingFilter(event.target.value)} aria-label="Filter by shipping status" className="mt-2 block w-full rounded-md border border-slate-200 bg-white px-1.5 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400">
+                      <option value="All">All</option>
+                      {Object.values(ShippingStatus).map((status) => <option key={status} value={status}>{status}</option>)}
+                    </select>
+                  </th>
+                  <th className="min-w-32 py-3 px-3 text-center">
+                    {renderSortHeader("Payment Status", "payment")}
+                    <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter by payment status" className="mt-2 block w-full rounded-md border border-slate-200 bg-white px-1.5 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400">
+                      <option value="All">All</option>
+                      {Object.values(PaymentStatus).map((status) => <option key={status} value={status}>{status}</option>)}
+                    </select>
+                  </th>
+                  <th className="min-w-28 py-3 px-3 text-center">
+                    {renderSortHeader("Days Unpaid", "daysUnpaid")}
+                    <select value={daysUnpaidFilter} onChange={(event) => setDaysUnpaidFilter(event.target.value)} aria-label="Filter by days unpaid" className="mt-2 block w-full rounded-md border border-slate-200 bg-white px-1.5 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400">
+                      {daysUnpaidRanges.map((range) => <option key={range.value} value={range.value}>{range.value === "All" ? "All" : range.label}</option>)}
+                    </select>
+                  </th>
+                  <th className="min-w-32 py-3 px-3 text-center">
+                    {renderSortHeader("Invoice Status", "invoiceStatus")}
+                    <select value={invoiceStatusFilter} onChange={(event) => setInvoiceStatusFilter(event.target.value)} aria-label="Filter by invoice status" className="mt-2 block w-full rounded-md border border-slate-200 bg-white px-1.5 py-1.5 text-[10px] font-normal normal-case tracking-normal outline-none focus:border-rose-400">
+                      <option value="All">All</option>
+                      {Object.values(InvoiceStatus).map((status) => <option key={status} value={status}>{status}</option>)}
+                    </select>
+                  </th>
                   <th className="py-4 px-6 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
-                {filteredInvoices.map((inv) => {
+                {sortedInvoices.map((inv) => {
                   const dateObj = getInvoiceDate(inv);
                   const daysUnpaid = getDaysUnpaid(inv);
                   const agingRowClass = getAgingRowClass(daysUnpaid);
@@ -967,6 +1095,13 @@ export default function InvoiceList({ userProfile, onSelectInvoice, onEditInvoic
                 Payment status
                 <select value={editingInvoice.paymentStatus} onChange={(e) => setEditingInvoice({ ...editingInvoice, paymentStatus: e.target.value as PaymentStatus })} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs normal-case text-slate-900 outline-none focus:border-rose-400">
                   {Object.values(PaymentStatus).map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </label>
+              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Payment terms
+                <select value={editingInvoice.paymentTerms || "Pay First"} onChange={(e) => setEditingInvoice({ ...editingInvoice, paymentTerms: e.target.value as "Pay First" | "COD" })} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs normal-case text-slate-900 outline-none focus:border-rose-400">
+                  <option value="Pay First">Pay First</option>
+                  <option value="COD">COD</option>
                 </select>
               </label>
               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">

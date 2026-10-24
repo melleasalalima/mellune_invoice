@@ -18,18 +18,20 @@ function getCustomerKey(invoiceData) {
   return base.replace(/[^a-z0-9]/g, '_');
 }
 
-async function updateCustomerTotalAndTopSpender(key, info, delta) {
-  if (!key || !delta) return;
-  const custRef = db.doc(`aggregates/customerTotals/${key}`);
+async function updateCustomerTotalAndTopSpender(key, info, spendDelta, invoiceDelta = 0) {
+  if (!key || (!spendDelta && !invoiceDelta)) return;
+  const custRef = db.doc(`customerTotals/${key}`);
   const topRef = db.doc(`aggregates/topSpender`);
 
   try {
     await db.runTransaction(async (t) => {
       const snap = await t.get(custRef);
       const prior = snap.exists ? (snap.data().totalSpent || 0) : 0;
-      const nextTotal = prior + delta;
+      const nextTotal = Math.max(0, prior + spendDelta);
+      const priorInvoiceCount = snap.exists ? (snap.data().invoiceCount || 0) : 0;
       const payload = {
         totalSpent: nextTotal,
+        invoiceCount: Math.max(0, priorInvoiceCount + invoiceDelta),
         displayName: info?.customerName || info?.name || null,
         email: info?.customerEmail || info?.email || null,
         phone: info?.customerPhone || info?.phone || null,
@@ -39,7 +41,7 @@ async function updateCustomerTotalAndTopSpender(key, info, delta) {
 
       const topSnap = await t.get(topRef);
       const topTotal = topSnap.exists ? (topSnap.data().totalSpent || 0) : 0;
-      if (nextTotal > topTotal) {
+      if (nextTotal > topTotal || (topSnap.exists && topSnap.data().customerKey === key && nextTotal < topTotal)) {
         t.set(topRef, {
           customerKey: key,
           totalSpent: nextTotal,
@@ -67,7 +69,7 @@ exports.onInvoiceWrite = functions.firestore
     // Invoice created
     if (!before && after) {
       deltaInvoiceCount += 1;
-      if (after.paymentStatus === "PAID") {
+      if (after.paymentStatus === "Paid") {
         deltaTotalPaid += Number(after.totalAmount || 0);
       }
     }
@@ -75,7 +77,7 @@ exports.onInvoiceWrite = functions.firestore
     // Invoice deleted
     if (before && !after) {
       deltaInvoiceCount -= 1;
-      if (before.paymentStatus === "PAID") {
+      if (before.paymentStatus === "Paid") {
         deltaTotalPaid -= Number(before.totalAmount || 0);
       }
     }
@@ -83,8 +85,8 @@ exports.onInvoiceWrite = functions.firestore
     // Invoice updated
     if (before && after) {
       // If payment status changed, adjust accordingly
-      const beforePaid = before.paymentStatus === "PAID";
-      const afterPaid = after.paymentStatus === "PAID";
+      const beforePaid = before.paymentStatus === "Paid";
+      const afterPaid = after.paymentStatus === "Paid";
       const beforeAmount = Number(before.totalAmount || 0);
       const afterAmount = Number(after.totalAmount || 0);
 
@@ -102,41 +104,22 @@ exports.onInvoiceWrite = functions.firestore
     try {
       const beforeKey = getCustomerKey(before);
       const afterKey = getCustomerKey(after);
-      // Handle creation
-      if (!before && after) {
-        if (after.paymentStatus === 'PAID' && afterKey) {
-          await updateCustomerTotalAndTopSpender(afterKey, after, Number(after.totalAmount || 0));
-        }
-      }
-      // Handle deletion
-      if (before && !after) {
-        if (before.paymentStatus === 'PAID' && beforeKey) {
-          await updateCustomerTotalAndTopSpender(beforeKey, before, -Number(before.totalAmount || 0));
-        }
-      }
-      // Handle update
-      if (before && after) {
-        const beforePaid = before.paymentStatus === 'PAID';
-        const afterPaid = after.paymentStatus === 'PAID';
-        const beforeAmount = Number(before.totalAmount || 0);
-        const afterAmount = Number(after.totalAmount || 0);
+      if (!before && after && afterKey) {
+        const paidAmount = after.paymentStatus === 'Paid' ? Number(after.totalAmount || 0) : 0;
+        await updateCustomerTotalAndTopSpender(afterKey, after, paidAmount, 1);
+      } else if (before && !after && beforeKey) {
+        const paidAmount = before.paymentStatus === 'Paid' ? Number(before.totalAmount || 0) : 0;
+        await updateCustomerTotalAndTopSpender(beforeKey, before, -paidAmount, -1);
+      } else if (before && after) {
+        const beforePaidAmount = before.paymentStatus === 'Paid' ? Number(before.totalAmount || 0) : 0;
+        const afterPaidAmount = after.paymentStatus === 'Paid' ? Number(after.totalAmount || 0) : 0;
+        const paidDelta = afterPaidAmount - beforePaidAmount;
 
         if (beforeKey === afterKey) {
-          if (!beforePaid && afterPaid && afterKey) {
-            await updateCustomerTotalAndTopSpender(afterKey, after, afterAmount);
-          } else if (beforePaid && !afterPaid && beforeKey) {
-            await updateCustomerTotalAndTopSpender(beforeKey, before, -beforeAmount);
-          } else if (beforePaid && afterPaid && afterKey) {
-            await updateCustomerTotalAndTopSpender(afterKey, after, afterAmount - beforeAmount);
-          }
+          if (afterKey && paidDelta) await updateCustomerTotalAndTopSpender(afterKey, after, paidDelta);
         } else {
-          // Customer changed on invoice: move amounts between keys
-          if (beforePaid && beforeKey) {
-            await updateCustomerTotalAndTopSpender(beforeKey, before, -beforeAmount);
-          }
-          if (afterPaid && afterKey) {
-            await updateCustomerTotalAndTopSpender(afterKey, after, afterAmount);
-          }
+          if (beforeKey) await updateCustomerTotalAndTopSpender(beforeKey, before, -beforePaidAmount, -1);
+          if (afterKey) await updateCustomerTotalAndTopSpender(afterKey, after, afterPaidAmount, 1);
         }
       }
     } catch (err) {

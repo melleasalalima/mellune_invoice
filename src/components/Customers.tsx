@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useEffect } from "react";
-import { collection, onSnapshot, doc, setDoc, deleteDoc, serverTimestamp, query, orderBy, getDocs, limit, startAfter } from "firebase/firestore";
-import { db, handleFirestoreError, OperationType } from "../lib/firebase";
+import { collection, doc, documentId, setDoc, deleteDoc, serverTimestamp, query, orderBy, getDocs, getDoc, limit, startAfter, where } from "firebase/firestore";
+import { db, getDocCacheFirst, getDocsCacheFirst, handleFirestoreError, OperationType } from "../lib/firebase";
 import { Customer, Invoice, UserProfile, UserRole, PaymentStatus } from "../types";
 import { 
   Users, 
@@ -40,9 +40,17 @@ export default function Customers({ userProfile }: CustomersProps) {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [aggregates, setAggregates] = useState<{ totalPaidRevenue?: number; totalCustomers?: number } | null>(null);
+  const [customerSpendTotals, setCustomerSpendTotals] = useState<Record<string, number>>({});
+  const [customerInvoiceTotals, setCustomerInvoiceTotals] = useState<Record<string, number>>({});
+  const [globalTopSpender, setGlobalTopSpender] = useState<{ customerKey: string; displayName: string; totalSpent: number } | null>(null);
   const PAGE_SIZE = 80;
+  const INVOICE_METRICS_PAGE_SIZE = 100;
   const [lastCustomerDoc, setLastCustomerDoc] = useState<any | null>(null);
   const [hasMoreCustomers, setHasMoreCustomers] = useState(true);
+  const [loadingMoreCustomers, setLoadingMoreCustomers] = useState(false);
+  const [lastMetricsInvoiceDoc, setLastMetricsInvoiceDoc] = useState<any | null>(null);
+  const [hasMoreMetricsInvoices, setHasMoreMetricsInvoices] = useState(false);
+  const [loadingMoreMetricsInvoices, setLoadingMoreMetricsInvoices] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -83,15 +91,47 @@ export default function Customers({ userProfile }: CustomersProps) {
 
   const hasWriteAccess = userProfile.role === UserRole.SUPER_ADMIN || userProfile.role === UserRole.ADMIN;
 
+  const getAggregateCustomerKey = (customer: Customer) => {
+    const email = customer.email?.trim().toLowerCase();
+    const phone = customer.phone?.replace(/\D/g, "");
+    const name = customer.name?.trim().toLowerCase();
+    const identity = email || phone || name;
+    return identity ? identity.replace(/[^a-z0-9]/g, "_") : null;
+  };
+
+  const loadCustomerSpendTotals = async (customerList: Customer[]) => {
+    const keys = Array.from(new Set(customerList.map(getAggregateCustomerKey).filter((key): key is string => Boolean(key))));
+    const totalQueries = [];
+    for (let index = 0; index < keys.length; index += 30) {
+      const keyBatch = keys.slice(index, index + 30);
+      totalQueries.push(getDocsCacheFirst(query(
+        collection(db, "customerTotals"),
+        where(documentId(), "in", keyBatch)
+      )));
+    }
+    const snapshots = await Promise.all(totalQueries);
+    const totals: Record<string, number> = {};
+    const invoiceCounts: Record<string, number> = {};
+    snapshots.forEach((snapshot) => snapshot.forEach((totalDoc) => {
+      const data = totalDoc.data();
+      const amount = data.totalSpent;
+      if (typeof amount === "number") totals[totalDoc.id] = amount;
+      if (typeof data.invoiceCount === "number") invoiceCounts[totalDoc.id] = data.invoiceCount;
+    }));
+    setCustomerSpendTotals((current) => ({ ...current, ...totals }));
+    setCustomerInvoiceTotals((current) => ({ ...current, ...invoiceCounts }));
+  };
+
   // Sync Customers & Invoices
   useEffect(() => {
     setLoading(true);
     
     // Subscribe to Customers (first page only)
     const qCustomers = query(collection(db, "customers"), orderBy("name", "asc"), limit(PAGE_SIZE));
-    const unsubCustomers = onSnapshot(
-      qCustomers,
+    let isActive = true;
+    getDocsCacheFirst(qCustomers).then(
       (snapshot) => {
+        if (!isActive) return;
         const customerList: Customer[] = [];
         snapshot.forEach((doc) => {
           customerList.push({ id: doc.id, ...doc.data() } as Customer);
@@ -100,8 +140,10 @@ export default function Customers({ userProfile }: CustomersProps) {
         setLastCustomerDoc(snapshot.docs[snapshot.docs.length - 1] || null);
         setHasMoreCustomers(snapshot.size >= PAGE_SIZE);
         setLoading(false);
+        loadCustomerSpendTotals(customerList).catch((err) => console.warn("Could not load customer spend totals:", err));
       },
       (err) => {
+        if (!isActive) return;
         setLoading(false);
         try {
           handleFirestoreError(err, OperationType.GET, "customers");
@@ -111,18 +153,21 @@ export default function Customers({ userProfile }: CustomersProps) {
       }
     );
 
-    // Subscribe to Invoices - load recent 2000 invoices for customer metrics
-    const qInvoices = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(2000));
-    const unsubInvoices = onSnapshot(
-      qInvoices,
+    // Load metrics incrementally so opening Customers never scans a large invoice set.
+    const qInvoices = query(collection(db, "invoices"), orderBy("createdAt", "desc"), limit(INVOICE_METRICS_PAGE_SIZE));
+    getDocsCacheFirst(qInvoices).then(
       (snapshot) => {
+        if (!isActive) return;
         const invoiceList: Invoice[] = [];
         snapshot.forEach((doc) => {
           invoiceList.push({ id: doc.id, ...doc.data() } as Invoice);
         });
         setInvoices(invoiceList);
+        setLastMetricsInvoiceDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+        setHasMoreMetricsInvoices(snapshot.size >= INVOICE_METRICS_PAGE_SIZE);
       },
       (err) => {
+        if (!isActive) return;
         try {
           handleFirestoreError(err, OperationType.GET, "invoices");
         } catch (wrappedError: any) {
@@ -132,44 +177,79 @@ export default function Customers({ userProfile }: CustomersProps) {
     );
 
     return () => {
-      unsubCustomers();
-      unsubInvoices();
+      isActive = false;
     };
   }, []);
 
+  const loadMoreMetricsInvoices = async () => {
+    if (!hasMoreMetricsInvoices || !lastMetricsInvoiceDoc || loadingMoreMetricsInvoices) return;
+    setLoadingMoreMetricsInvoices(true);
+    try {
+      const nextQuery = query(
+        collection(db, "invoices"),
+        orderBy("createdAt", "desc"),
+        startAfter(lastMetricsInvoiceDoc),
+        limit(INVOICE_METRICS_PAGE_SIZE)
+      );
+      const snapshot = await getDocsCacheFirst(nextQuery);
+      const olderInvoices = snapshot.docs.map((invoiceDoc) => ({
+        id: invoiceDoc.id,
+        ...invoiceDoc.data(),
+      } as Invoice));
+      setInvoices((current) => [...current, ...olderInvoices]);
+      setLastMetricsInvoiceDoc(snapshot.docs[snapshot.docs.length - 1] || null);
+      setHasMoreMetricsInvoices(snapshot.size >= INVOICE_METRICS_PAGE_SIZE);
+    } catch (err) {
+      console.warn("Failed to load older invoices for customer metrics:", err);
+    } finally {
+      setLoadingMoreMetricsInvoices(false);
+    }
+  };
+
   const loadMoreCustomers = async () => {
-    if (!hasMoreCustomers || !lastCustomerDoc) return;
+    if (!hasMoreCustomers || !lastCustomerDoc || loadingMoreCustomers) return;
+    setLoadingMoreCustomers(true);
     try {
       const nextQ = query(collection(db, "customers"), orderBy("name", "asc"), startAfter(lastCustomerDoc), limit(PAGE_SIZE));
-      const snap = await getDocs(nextQ);
+      const snap = await getDocsCacheFirst(nextQ);
       const more: Customer[] = [];
       snap.forEach((d) => more.push({ id: d.id, ...d.data() } as Customer));
       setCustomers((prev) => [...prev, ...more]);
+      loadCustomerSpendTotals(more).catch((err) => console.warn("Could not load customer spend totals:", err));
       setLastCustomerDoc(snap.docs[snap.docs.length - 1] || null);
       setHasMoreCustomers(snap.size >= PAGE_SIZE);
     } catch (err) {
       console.warn('Failed to load more customers', err);
+    } finally {
+      setLoadingMoreCustomers(false);
     }
   };
 
   // Subscribe to light-weight aggregates document for totals
   useEffect(() => {
     const aggRef = doc(db, "aggregates", "shopStats");
-    const unsubAgg = onSnapshot(aggRef, (snap) => {
-      if (!snap.exists()) {
-        setAggregates(null);
-        return;
+    const topCustomerQuery = query(collection(db, "customerTotals"), orderBy("totalSpent", "desc"), limit(1));
+    let isActive = true;
+    Promise.all([getDocCacheFirst(aggRef), getDocsCacheFirst(topCustomerQuery)]).then(([snap, topSnapshot]) => {
+      if (!isActive) return;
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        setAggregates({
+          totalPaidRevenue: typeof data.totalPaidRevenue === 'number' ? data.totalPaidRevenue : undefined,
+          totalCustomers: typeof data.totalCustomers === 'number' ? data.totalCustomers : undefined,
+        });
       }
-      const data = snap.data() as any;
-      setAggregates({
-        totalPaidRevenue: typeof data.totalPaidRevenue === 'number' ? data.totalPaidRevenue : undefined,
-        totalCustomers: typeof data.totalCustomers === 'number' ? data.totalCustomers : undefined,
-      });
-    }, (err) => {
+      const topDoc = topSnapshot.docs[0];
+      const topData = topDoc?.data();
+      if (topData && typeof topData.displayName === "string" && typeof topData.totalSpent === "number") {
+        setGlobalTopSpender({ customerKey: topDoc.id, displayName: topData.displayName, totalSpent: topData.totalSpent });
+      }
+    }).catch((err) => {
+      if (!isActive) return;
       console.warn('Failed to subscribe to aggregates/shopStats', err);
     });
 
-    return () => unsubAgg();
+    return () => { isActive = false; };
   }, []);
 
   // Helper function to link customer and calculate dynamic spend metrics
@@ -183,8 +263,13 @@ export default function Customers({ userProfile }: CustomersProps) {
     });
 
     const paidInvoices = customerInvoices.filter((inv) => inv.paymentStatus === PaymentStatus.PAID);
-    const totalSpent = paidInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
-    const invoiceCount = customerInvoices.length;
+    const aggregateKey = getAggregateCustomerKey(cust);
+    const totalSpent = aggregateKey && typeof customerSpendTotals[aggregateKey] === "number"
+      ? customerSpendTotals[aggregateKey]
+      : paidInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
+    const invoiceCount = aggregateKey && typeof customerInvoiceTotals[aggregateKey] === "number"
+      ? customerInvoiceTotals[aggregateKey]
+      : customerInvoices.length;
     const avgSpent = invoiceCount > 0 ? totalSpent / invoiceCount : 0;
 
     return {
@@ -300,8 +385,8 @@ export default function Customers({ userProfile }: CustomersProps) {
   const totalCustomersCount = aggregates?.totalCustomers ?? compiledCustomers.length;
   
   // Find highest spender
-  const topSpenderObj = compiledCustomers.length > 0 
-    ? [...compiledCustomers].sort((a, b) => b.metrics.totalSpent - a.metrics.totalSpent)[0] 
+  const topSpenderObj = globalTopSpender
+    ? { name: globalTopSpender.displayName, totalSpent: globalTopSpender.totalSpent }
     : null;
 
   // Filter and Sort compiled list
@@ -391,10 +476,10 @@ export default function Customers({ userProfile }: CustomersProps) {
           <div className="min-w-0 flex-1">
             <span className="text-[10px] font-mono text-amber-650 font-extrabold uppercase tracking-wider block">Top Spender 👑</span>
             <span className="text-sm font-bold text-slate-900 truncate mt-1 block">
-              {topSpenderObj ? topSpenderObj.name : "N/A"}
+              {topSpenderObj ? topSpenderObj.name : "Totals not initialized"}
             </span>
             <span className="text-[11px] text-amber-700 font-bold font-mono mt-0.5 block">
-              ₱{topSpenderObj ? topSpenderObj.metrics.totalSpent.toFixed(2) : "0.00"}
+              {topSpenderObj ? `₱${topSpenderObj.totalSpent.toFixed(2)}` : "Deploy function and backfill"}
             </span>
           </div>
         </div>
@@ -528,7 +613,7 @@ export default function Customers({ userProfile }: CustomersProps) {
                         <div>
                           <div className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
                             {cust.name}
-                            {idx === 0 && sortBy === "spend" && (
+                            {sortBy === "spend" && getAggregateCustomerKey(cust) === globalTopSpender?.customerKey && (
                               <span className="text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded-md font-mono font-bold uppercase tracking-wider animate-bounce">
                                 #1 Buyer 👑
                               </span>
@@ -606,6 +691,33 @@ export default function Customers({ userProfile }: CustomersProps) {
               </tbody>
             </table>
           )}
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-3">
+          <span className="text-[10px] text-slate-500">
+            Showing {customers.length}{totalCustomersCount > customers.length ? ` of ${totalCustomersCount}` : ""} customers. Lifetime totals require the corrected function to be deployed and historical invoices to be backfilled; order counts and receipt history use {invoices.length} loaded invoices.
+          </span>
+          <div className="flex flex-wrap gap-2">
+          {hasMoreCustomers && (
+            <button
+              type="button"
+              onClick={loadMoreCustomers}
+              disabled={loadingMoreCustomers}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {loadingMoreCustomers ? "Loading..." : `Load ${PAGE_SIZE} more customers`}
+            </button>
+          )}
+          {hasMoreMetricsInvoices && (
+            <button
+              type="button"
+              onClick={loadMoreMetricsInvoices}
+              disabled={loadingMoreMetricsInvoices}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            >
+              {loadingMoreMetricsInvoices ? "Loading..." : "Load older invoice history"}
+            </button>
+          )}
+          </div>
         </div>
       </div>
 

@@ -65,12 +65,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           createdAt: existingData.createdAt,
           updatedAt: serverTimestamp(),
         };
-        // Update user timestamp and display name if changed
-        await setDoc(userDocRef, {
-          ...existingData,
-          displayName: profileData.displayName,
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
+        if (existingData.displayName !== profileData.displayName) {
+          await setDoc(userDocRef, {
+            displayName: profileData.displayName,
+            updatedAt: serverTimestamp(),
+          }, { merge: true });
+        }
       } else {
         profileData = {
           uid: firebaseUser.uid,
@@ -130,10 +130,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           createdAt: existingData.createdAt,
           updatedAt: serverTimestamp(),
         };
-        await setDoc(userDocRef, {
-          displayName: profileData.displayName,
-          updatedAt: serverTimestamp(),
-        }, { merge: true });
+        if (userDocSnap.data().displayName !== profileData.displayName) {
+          await setDoc(userDocRef, {
+            displayName: profileData.displayName,
+            updatedAt: serverTimestamp(),
+          }, { merge: true });
+        }
       } else {
         profileData = {
           uid: firebaseUser.uid,
@@ -285,8 +287,14 @@ export default function Login({ onLoginSuccess }: LoginProps) {
         updatedAt: serverTimestamp(),
       };
 
-      // Set/update the profile document in the database
-      await setDoc(userDocRef, profileData, { merge: true });
+      const existingProfile = userDocSnap.data();
+      if (
+        !userDocSnap.exists() ||
+        existingProfile.role !== profileData.role ||
+        existingProfile.displayName !== profileData.displayName
+      ) {
+        await setDoc(userDocRef, profileData, { merge: true });
+      }
 
       onLoginSuccess({
         ...profileData,
